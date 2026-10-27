@@ -1,0 +1,149 @@
+# Diagrams and report notes
+
+This folder is where your generated diagrams go (`er-diagram.png`, `class-diagram.png`,
+`system-flow.png`, `project-report.pdf`). The text below is the source material for drawing
+them — paste it into draw.io, Mermaid Live, dbdiagram.io or Lucidchart and export as PNG.
+
+---
+
+## ER diagram
+
+```mermaid
+erDiagram
+    USERS ||--o{ ORDERS : places
+    USERS ||--o{ CART_ITEMS : holds
+    USERS ||--o| RESTAURANTS : owns
+    USERS ||--o| DELIVERY_AGENTS : "is"
+    USERS ||--o{ REVIEWS : writes
+
+    RESTAURANTS ||--o{ FOOD_ITEMS : lists
+    RESTAURANTS ||--o{ ORDERS : receives
+    RESTAURANTS ||--o{ REVIEWS : receives
+
+    CATEGORIES ||--o{ FOOD_ITEMS : groups
+
+    FOOD_ITEMS ||--o{ CART_ITEMS : "added as"
+    FOOD_ITEMS ||--o{ ORDER_ITEMS : "ordered as"
+
+    ORDERS ||--|{ ORDER_ITEMS : contains
+    ORDERS ||--o| PAYMENTS : "settled by"
+    DELIVERY_AGENTS ||--o{ ORDERS : delivers
+
+    COUPONS }o--o{ ORDERS : "applied to"
+    FAQ_CATEGORIES ||--o{ FAQS : groups
+    ITEM_PAIR_COUNTS }o--|| FOOD_ITEMS : "counts pairs of"
+```
+
+Key columns worth showing on the diagram:
+
+- `food_items`: `stock_count`, `low_stock_threshold`, `availability` — the three that drive the availability rule
+- `orders`: `status`, `priority_score`, `manual_priority`, `promised_minutes` — the smart-queue inputs
+- `delivery_agents`: `status` — AVAILABLE / ASSIGNED / OUT_FOR_DELIVERY / OFFLINE
+- `item_pair_counts`: `food_id_a`, `food_id_b`, `pair_count` — the co-occurrence table
+
+---
+
+## Class diagram (backend layers)
+
+```mermaid
+classDiagram
+    class BaseEntity {
+        +Long id
+        +LocalDateTime createdAt
+        +LocalDateTime updatedAt
+    }
+    BaseEntity <|-- User
+    BaseEntity <|-- Restaurant
+    BaseEntity <|-- FoodItem
+    BaseEntity <|-- Order
+    BaseEntity <|-- DeliveryAgent
+
+    class FoodItem {
+        +int stockCount
+        +int lowStockThreshold
+        +Availability availability
+        +refreshAvailability()
+        +reduceStock(int)
+        +restoreStock(int)
+    }
+
+    class Order {
+        +OrderStatus status
+        +int priorityScore
+        +Integer manualPriority
+        +effectivePriority() int
+        +totalPrepTime() int
+    }
+
+    class OrderService {
+        +placeOrder()
+        +updateStatus()
+        +cancelOrder()
+        +smartQueue()
+    }
+    class PriorityService {
+        +calculateScore(Order) int
+        +buildQueue(List~Order~) List~Order~
+    }
+    class RecommendationService {
+        +personalised(customerId) List
+        +frequentlyBoughtTogether(foodId) List
+        +recordOrder(Order)
+    }
+    class DeliveryService {
+        +assignAgent(Order)
+        +advance(orderId, status)
+    }
+
+    OrderService --> PriorityService
+    OrderService --> RecommendationService
+    OrderService --> DeliveryService
+    OrderService --> FoodItem
+```
+
+Layering to show: `Controller → Service → Repository (Spring Data JPA) → MySQL`, with DTOs
+crossing the controller boundary and entities staying inside the service layer.
+
+---
+
+## System flow
+
+```mermaid
+flowchart TD
+    A[Customer browses menu] --> B{Availability?}
+    B -- OUT_OF_STOCK --> B1[Add to cart disabled]
+    B -- LOW_STOCK --> C[Shows 'Only N left']
+    B -- AVAILABLE --> C
+    C --> D[Add to cart]
+    D --> E[Checkout: UPI / Card / COD simulated]
+    E --> F[Order PLACED, stock reduced, item pairs recorded]
+    F --> G[Priority score computed]
+    G --> H[Smart Order Queue at the restaurant]
+    H --> I[CONFIRMED]
+    I --> J[PREPARING]
+    J --> K[READY]
+    K --> L{Free agent?}
+    L -- yes --> M[ASSIGNED round-robin]
+    L -- no --> K
+    M --> N[OUT_FOR_DELIVERY]
+    N --> O[DELIVERED, agent back to AVAILABLE]
+    O --> P[Customer reviews the order]
+
+    F -.cancel while PLACED/CONFIRMED.-> Q[CANCELLED: stock restored, payment refunded]
+    J -.cancel attempt.-> R[InvalidCancellationException -> Help Centre]
+```
+
+---
+
+## Priority score, for the report
+
+| Signal | Maximum | Rule |
+|---|---|---|
+| Waiting time | 40 | 2 points per minute waited |
+| Urgency | 30 | ≤0 min of the promise left: 30 · ≤10: 25 · ≤20: 15 · otherwise 5 |
+| Preparation time | 20 | longest dish prep time × 0.6 |
+| Complexity | 10 | 2 points per item |
+
+Bands: **HIGH** ≥ 75 · **MEDIUM** ≥ 50 · **LOW** below 50.
+Orders are ranked with `PriorityQueue` and a `Comparator` on the effective priority
+(manual override if set, otherwise the computed score), with the older order winning ties.
